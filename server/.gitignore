@@ -17,5 +17,5 @@ logs/
 *.log
 
 # Dependency directories
-/jspm_packages/
-/bower_components/
+# /jspm_packages/
+# /bower_components/
