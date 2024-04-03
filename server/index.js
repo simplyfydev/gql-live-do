@@ -1,122 +1,80 @@
-// server.js
-
 const express = require('express');
 const { ApolloServer, gql } = require('apollo-server-express');
-const mongoose = require('mongoose');
-const { PubSub } = require("graphql-subscriptions")
-const http = require('http')
-
+const { execute, subscribe } = require('graphql');
+const { makeExecutableSchema } = require('@graphql-tools/schema');
+const { createServer } = require('http');
 const { useServer } = require('graphql-ws/lib/use/ws');
 const { WebSocketServer } = require('ws');
-
-
-
-
-
-
-// Connect to MongoDB
-const URL = 'mongodb+srv://dhananjay372001:kVQzFriX8RV856ob@cluster0.giv6mdz.mongodb.net/liveDoData'
-
-mongoose.connect(URL, { useNewUrlParser: true, useUnifiedTopology: true });
-const db = mongoose.connection;
-db.on('error', console.error.bind(console, 'connection error:'));
-db.once('open', () => {
-    console.log('Connected to MongoDB');
-});
-
-
-
+const { PubSub } = require('graphql-subscriptions');
 
 const pubsub = new PubSub();
+const TODO_ADDED = 'TODO_ADDED';
 
-// Define MongoDB schema
-const todoSchema = new mongoose.Schema({
-    text: String,
-    completed: Boolean
-});
-const Todo = mongoose.model('Todo', todoSchema);
+let todos = []; // Store todos in-memory for simplicity
 
-// GraphQL type definitions
 const typeDefs = gql`
   type Todo {
     id: ID!
     text: String!
-    completed: Boolean!
   }
-
   type Query {
     todos: [Todo]
   }
-
   type Mutation {
     addTodo(text: String!): Todo
-    toggleTodoCompleted(id: ID!): Todo
   }
-
   type Subscription {
     todoAdded: Todo
-    todoToggled: Todo
   }
 `;
 
-// Resolvers
 const resolvers = {
-    Query: {
-        todos: () => Todo.find().exec()
+  Query: {
+    todos: () => todos,
+  },
+  Mutation: {
+    addTodo: (_, { text }) => {
+      const newTodo = { id: todos.length + 1, text };
+      todos.push(newTodo);
+      pubsub.publish(TODO_ADDED, { todoAdded: newTodo });
+      return newTodo;
     },
-    Mutation: {
-        addTodo: async (_, { text }) => {
-            const todo = new Todo({ text, completed: false });
-            await todo.save();
-            pubsub.publish('TODO_ADDED', { todoAdded: todo });
-            return todo;
-        },
-
-        toggleTodoCompleted: async (_, { id }) => {
-            const todo = await Todo.findById(id);
-            todo.completed = !todo.completed;
-            await todo.save();
-            pubsub.publish('TODO_TOGGLED', { todoToggled: todo });
-            return todo;
-        }
+  },
+  Subscription: {
+    todoAdded: {
+      subscribe: () => pubsub.asyncIterator([TODO_ADDED]),
     },
-    Subscription: {
-        todoAdded: {
-            subscribe: () => pubsub.asyncIterator(['TODO_ADDED'])
-        },
-        todoToggled: {
-            subscribe: () => pubsub.asyncIterator(['TODO_TOGGLED'])
-        }
-    }
+  },
 };
 
+const schema = makeExecutableSchema({ typeDefs, resolvers });
 
 const app = express();
-const PORT = process.env.PORT || 4000;
 
+async function startServer() {
+  const apolloServer = new ApolloServer({
+    schema,
+    context: ({ req, res }) => ({ req, res, pubsub }),
+  });
 
-const server = new ApolloServer({
-    typeDefs,
-    resolvers,
-    context: ({ req, res }) => ({ req, res, pubsub })
-});
+  await apolloServer.start();
+  apolloServer.applyMiddleware({ app });
 
+  const httpServer = createServer(app);
+  const wsServer = new WebSocketServer({
+    server: httpServer,
+    path: '/graphql',
+  });
 
-server.start().then(res => {
-    server.applyMiddleware({ app });
+  useServer({ schema, execute, subscribe }, wsServer);
 
-    const httpServer = http.createServer(app);
-    // Set up WebSocket server
-    const wsServer = new WebSocketServer({
-        server: httpServer,
-        path: '/graphql',
-    });
+  const PORT = 4000;
+  httpServer.listen(PORT, () => {
+    console.log(`Server is now running on http://localhost:${PORT}${apolloServer.graphqlPath}`);
+    console.log(`Subscriptions are now running on ws://localhost:${PORT}/graphql`);
+  });
+}
 
-    useServer({ schema: server.schema }, wsServer);
+startServer().catch(error => console.error(error));
 
-    httpServer.listen(PORT, () => {
-        console.log(`Server ready at http://localhost:${PORT}${server.graphqlPath}`);
-        console.log(`Subscriptions ready at ws://localhost:${PORT}/graphql`);
-    });
-});
 
